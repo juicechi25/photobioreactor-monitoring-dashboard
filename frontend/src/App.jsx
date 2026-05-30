@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import Login from "./components/Login.jsx";
 import FleetOverview from "./components/FleetOverview.jsx";
-import ChatBox from "./components/ChatBox.jsx";
+import Dashboard from "./components/Dashboard.jsx";
 import systemsData from "./data/system.json";
 import "./App.css";
 
@@ -9,7 +9,9 @@ export default function App() {
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [selectedSystem, setSelectedSystem] = useState(null);
+
   const [logs, setLogs] = useState([]);
+  const [systemErrors, setSystemErrors] = useState([]);
 
   const [latency, setLatency] = useState(45);
   const [pumpOn, setPumpOn] = useState(false);
@@ -41,26 +43,42 @@ export default function App() {
     ]);
   }
 
+  function addSystemError(code, message) {
+    setSystemErrors((prev) => [
+      {
+        id: Date.now(),
+        timestamp: new Date().toLocaleTimeString(),
+        code,
+        message,
+      },
+      ...prev,
+    ]);
+  }
+
   function convertSystem(system) {
     return {
       id: system.id,
       location: system.location,
       latitude: system.latitude,
       longitude: system.longitude,
+
       sensors: {
         temperature: system.temperature,
         ph: system.ph,
         oxygen: system.oxygen,
         turbidity: system.turbidity,
       },
+
       connection: {
         latency: system.latency,
         status: system.latency > 1000 ? "STALE" : "ONLINE",
       },
+
       actuators: {
         pump: false,
         lights: true,
       },
+
       favorite: system.favorite,
     };
   }
@@ -72,11 +90,14 @@ export default function App() {
 
   function logout() {
     addLog(`${currentUser?.username} logged out`);
+
     setCurrentUser(null);
     setSelectedSystem(null);
     setWeather(null);
     setChatOpen(false);
+    setNotificationOpen(false);
     setUnreadMessages([]);
+    setStatus("ONLINE");
   }
 
   function handleSelectSystem(system) {
@@ -88,7 +109,6 @@ export default function App() {
     setLightOn(system.actuators.lights);
     setWeather(null);
     setChatOpen(false);
-    setUnreadMessages([]);
     addLog(`${currentUser?.username || "user"} selected ${system.id}`);
   }
 
@@ -100,6 +120,11 @@ export default function App() {
 
       if (assignedSystem) {
         handleSelectSystem(convertSystem(assignedSystem));
+      } else {
+        addSystemError(
+          "CLIENT_SITE_NOT_FOUND",
+          `No system found for assigned site ${currentUser.siteId}`
+        );
       }
     }
   }, [currentUser, selectedSystem]);
@@ -107,40 +132,53 @@ export default function App() {
   useEffect(() => {
     if (!selectedSystem) return;
 
-    const interval = setInterval(() => {
-      const newLatency = Math.floor(Math.random() * 2000);
+    const ws = new WebSocket(`ws://localhost:8000/ws/${selectedSystem.id}`);
 
-      setLatency(newLatency);
+    ws.onopen = () => {
+      console.log("WebSocket connected:", selectedSystem.id);
+      addLog(`Live telemetry connected for ${selectedSystem.id}`);
+    };
 
-      setSensorData((prev) => ({
-        temperature: (
-          Number(prev.temperature) +
-          (Math.random() - 0.5)
-        ).toFixed(1),
-        ph: (Number(prev.ph) + (Math.random() - 0.5) * 0.1).toFixed(2),
-        oxygen: Math.max(
-          0,
-          Math.min(
-            100,
-            Number(prev.oxygen) + Math.floor(Math.random() * 5 - 2)
-          )
-        ),
-        turbidity: Math.max(
-          0,
-          Number(prev.turbidity) + Math.floor(Math.random() * 3 - 1)
-        ),
-      }));
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
 
-      if (newLatency > 1000) {
+      setSensorData({
+        temperature: data.temperature,
+        ph: data.ph,
+        oxygen: data.oxygen,
+        turbidity: data.turbidity,
+      });
+
+      setLatency(data.latency);
+
+      if (data.latency > 1000) {
         setStatus("STALE");
-      } else if (newLatency > 200) {
+      } else if (data.latency > 200) {
         setStatus("WARNING");
       } else {
         setStatus("ONLINE");
       }
-    }, 1000);
+    };
 
-    return () => clearInterval(interval);
+    ws.onerror = () => {
+      setStatus("STALE");
+      addSystemError(
+        "WS_ERROR",
+        `WebSocket connection failed for ${selectedSystem.id}`
+      );
+    };
+
+    ws.onclose = () => {
+      setStatus("STALE");
+      addSystemError(
+        "WS_CLOSED",
+        `Live telemetry disconnected for ${selectedSystem.id}`
+      );
+    };
+
+    return () => {
+      ws.close();
+    };
   }, [selectedSystem]);
 
   useEffect(() => {
@@ -151,11 +189,24 @@ export default function App() {
         const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedSystem.latitude}&longitude=${selectedSystem.longitude}&current=temperature_2m,rain,wind_speed_10m,relative_humidity_2m`;
 
         const response = await fetch(url);
-        const data = await response.json();
 
+        if (!response.ok) {
+          addSystemError(
+            response.status,
+            `Failed to fetch weather for ${selectedSystem.location}`
+          );
+          setWeather(null);
+          return;
+        }
+
+        const data = await response.json();
         setWeather(data.current);
       } catch (error) {
-        console.error("Failed to fetch weather:", error);
+        console.error(error);
+        addSystemError(
+          "WEATHER_API_ERROR",
+          `Weather API unavailable for ${selectedSystem.location}`
+        );
         setWeather(null);
       }
     }
@@ -181,340 +232,238 @@ export default function App() {
     return "Outdoor conditions are suitable for normal operation.";
   }
 
-  function togglePump() {
-    setPumpOn((prev) => !prev);
-    addLog(!pumpOn ? "Pump enabled" : "Pump disabled");
-  }
+  async function sendActuatorCommand(actuator, action) {
+    try {
+      const response = await fetch("http://localhost:8000/actuator", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          system_id: selectedSystem.id,
+          actuator,
+          action,
+          role: currentUser.role,
+          username: currentUser.username,
+        }),
+      });
 
-  function toggleLight() {
-    setLightOn((prev) => !prev);
-    addLog(!lightOn ? "LED lights enabled" : "LED lights disabled");
-  }
+      const data = await response.json();
 
-  function emergencyStop() {
-    setPumpOn(false);
-    setLightOn(false);
-    addLog("EMERGENCY STOP activated");
-  }
-
-  function loadAllUnreadMessages() {
-  if (!isOperator) return;
-
-  const unread = [];
-
-  systemsData.forEach((system) => {
-    const saved = localStorage.getItem(`chat-${system.id}`);
-    const messages = saved ? JSON.parse(saved) : [];
-
-    messages.forEach((msg) => {
-      if (msg.role === "viewer" && !msg.readByOperator) {
-        unread.push(msg);
+      if (!response.ok) {
+        addSystemError(response.status, data.detail || "Actuator command failed");
+        alert(data.detail || "Actuator command failed");
+        return false;
       }
+
+      return true;
+    } catch (error) {
+      console.error(error);
+      addSystemError(
+        "ACTUATOR_API_ERROR",
+        "Backend unavailable while sending actuator command"
+      );
+      alert("Backend unavailable while sending actuator command");
+      return false;
+    }
+  }
+
+  async function togglePump() {
+    const success = await sendActuatorCommand("pump", pumpOn ? "off" : "on");
+
+    if (success) {
+      setPumpOn(!pumpOn);
+      addLog(`Pump ${!pumpOn ? "enabled" : "disabled"}`);
+    }
+  }
+
+  async function toggleLight() {
+    const success = await sendActuatorCommand("lights", lightOn ? "off" : "on");
+
+    if (success) {
+      setLightOn(!lightOn);
+      addLog(`Lights ${!lightOn ? "enabled" : "disabled"}`);
+    }
+  }
+
+  async function emergencyStop() {
+    try {
+      const response = await fetch("http://localhost:8000/emergency-stop", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          system_id: selectedSystem.id,
+          role: currentUser.role,
+          username: currentUser.username,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        addSystemError(response.status, data.detail || "Emergency stop failed");
+        alert(data.detail || "Emergency stop failed");
+        return;
+      }
+
+      setPumpOn(false);
+      setLightOn(false);
+      addLog("Emergency stop activated");
+    } catch (error) {
+      console.error(error);
+      addSystemError(
+        "EMERGENCY_STOP_API_ERROR",
+        "Backend unavailable during emergency stop"
+      );
+      alert("Backend unavailable during emergency stop");
+    }
+  }
+
+  async function downloadReport() {
+    if (!selectedSystem) return;
+
+    try {
+      const response = await fetch(
+        `http://localhost:8000/report/${selectedSystem.id}`
+      );
+
+      if (!response.ok) {
+        addSystemError(response.status, "Failed to download report");
+        alert("Failed to download report");
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${selectedSystem.id}_report.csv`;
+      document.body.appendChild(a);
+      a.click();
+
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      addLog(`Downloaded report for ${selectedSystem.id}`);
+    } catch (error) {
+      console.error(error);
+      addSystemError(
+        "REPORT_API_ERROR",
+        "Backend unavailable or report endpoint failed"
+      );
+      alert("Backend unavailable or report endpoint failed");
+    }
+  }
+
+  function getCurrentSiteUnreadMessages() {
+    if (!selectedSystem) return [];
+
+    return unreadMessages.filter((msg) => msg.systemId === selectedSystem.id);
+  }
+
+  function loadUnreadMessages() {
+    if (!currentUser) return;
+
+    const unread = [];
+
+    if (currentUser.role === "operator") {
+      systemsData.forEach((system) => {
+        const saved = localStorage.getItem(`chat-${system.id}`);
+        const messages = saved ? JSON.parse(saved) : [];
+
+        messages.forEach((msg) => {
+          if (msg.role === "viewer" && !msg.readByOperator) {
+            unread.push(msg);
+          }
+        });
+      });
+    }
+
+    if (currentUser.role === "viewer" && selectedSystem) {
+      const saved = localStorage.getItem(`chat-${selectedSystem.id}`);
+      const messages = saved ? JSON.parse(saved) : [];
+
+      messages.forEach((msg) => {
+        if (msg.role === "operator" && !msg.readByViewer) {
+          unread.push(msg);
+        }
+      });
+    }
+
+    setUnreadMessages((prev) => {
+      const prevIds = prev.map((msg) => msg.id).join(",");
+      const nextIds = unread.map((msg) => msg.id).join(",");
+
+      return prevIds === nextIds ? prev : unread;
     });
-  });
+  }
 
-  setUnreadMessages(unread);
-}
-useEffect(() => {
-  if (!isOperator) return;
+  useEffect(() => {
+    if (!currentUser) return;
 
-  loadAllUnreadMessages();
+    loadUnreadMessages();
 
-  const interval = setInterval(() => {
-    loadAllUnreadMessages();
-  }, 1000);
+    const interval = setInterval(() => {
+      loadUnreadMessages();
+    }, 1000);
 
-  return () => clearInterval(interval);
-}, [isOperator]);
-
+    return () => clearInterval(interval);
+  }, [currentUser, selectedSystem]);
 
   if (!currentUser) {
     return <Login onLogin={handleLogin} />;
   }
 
   if (isOperator && !selectedSystem) {
-  return (
-    <>
+    return (
       <FleetOverview
         onSelectSystem={handleSelectSystem}
         onLogout={logout}
         unreadMessages={unreadMessages}
         notificationOpen={notificationOpen}
-        onOpenNotifications={() =>
-          setNotificationOpen((prev) => !prev)
-        }
+        onOpenNotifications={() => setNotificationOpen((prev) => !prev)}
         onCloseNotifications={() => setNotificationOpen(false)}
       />
+    );
+  }
 
-      {notificationOpen && (
-        <aside className="notification-sidebar">
-          <div className="notification-header">
-            <h2>Notifications</h2>
-
-            <button
-              type="button"
-              onClick={() => setNotificationOpen(false)}
-            >
-              ×
-            </button>
-          </div>
-
-          {unreadMessages.length === 0 ? (
-            <p>No unread messages</p>
-          ) : (
-            unreadMessages.map((msg) => (
-              <div key={msg.id} className="notification-item">
-                <strong>{msg.sender}</strong>
-                <p>Client: {msg.systemId}</p>
-                <p>{msg.text}</p>
-                <span>{msg.timestamp}</span>
-              </div>
-            ))
-          )}
-        </aside>
-      )}
-    </>
-  );
-}
   if (!selectedSystem) {
     return <p>Loading dashboard...</p>;
   }
 
   return (
-    <div className="page">
-      <header className="header">
-        <div>
-          <h1>{selectedSystem.id} Dashboard</h1>
-          <p>
-            Location: {selectedSystem.location} | Role: {role}
-          </p>
-        </div>
-
-        <div className="header-actions">
-          {isOperator && (
-            <button
-              className="secondary-btn"
-              onClick={() => {
-                setSelectedSystem(null);
-                setWeather(null);
-                setChatOpen(false);
-                setUnreadMessages([]);
-              }}
-            >
-              Back to Fleet
-            </button>
-          )}
-
-          <button
-            className="chat-toggle-btn"
-            type="button"
-            onClick={() => setChatOpen(true)}
-          >
-            💬 Chat
-            {unreadMessages.length > 0 && (
-              <span className="notification-badge">
-                {unreadMessages.length}
-              </span>
-            )}
-          </button>
-
-          <button className="secondary-btn" onClick={logout}>
-            Logout
-          </button>
-        </div>
-      </header>
-
-      {isOperator && unreadMessages.length > 0 && (
-        <section className="status-banner warning">
-          New message from client {unreadMessages[0].systemId}
-        </section>
-      )}
-
-      <section className={`status-banner ${status.toLowerCase()}`}>
-        System Status: {status} | Latency: {latency} ms
-      </section>
-
-      <main className="dashboard">
-        <section className="card">
-          <h2>Live Sensor Telemetry</h2>
-
-          <div className="grid">
-            <div className="metric">
-              <span>Temperature</span>
-              <strong>{sensorData.temperature} °C</strong>
-            </div>
-
-            <div className="metric">
-              <span>pH</span>
-              <strong>{sensorData.ph}</strong>
-            </div>
-
-            <div className="metric">
-              <span>Dissolved Oxygen</span>
-              <strong>{sensorData.oxygen}%</strong>
-            </div>
-
-            <div className="metric">
-              <span>Turbidity</span>
-              <strong>{sensorData.turbidity} NTU</strong>
-            </div>
-          </div>
-        </section>
-
-        <section className="card">
-          <h2>Latency Monitor</h2>
-
-          <div className="latency-box">
-            <strong>{latency} ms</strong>
-            <p>
-              {latency <= 200
-                ? "Good live update speed"
-                : latency <= 1000
-                ? "Warning: delayed updates"
-                : "Unsafe: stale data"}
-            </p>
-          </div>
-        </section>
-
-        <section className="card">
-          <h2>Outdoor Weather</h2>
-
-          {weather ? (
-            <>
-              <div className="grid">
-                <div className="metric">
-                  <span>Air Temperature</span>
-                  <strong>{weather.temperature_2m} °C</strong>
-                </div>
-
-                <div className="metric">
-                  <span>Humidity</span>
-                  <strong>{weather.relative_humidity_2m}%</strong>
-                </div>
-
-                <div className="metric">
-                  <span>Rainfall</span>
-                  <strong>{weather.rain} mm</strong>
-                </div>
-
-                <div className="metric">
-                  <span>Wind Speed</span>
-                  <strong>{weather.wind_speed_10m} km/h</strong>
-                </div>
-              </div>
-
-              <div className="state-box">
-                <p>{getWeatherImpact()}</p>
-              </div>
-            </>
-          ) : (
-            <p>Loading weather for {selectedSystem.location}...</p>
-          )}
-        </section>
-
-        <section className="card">
-          <h2>Actuator Control</h2>
-
-          {!isOperator && (
-            <p className="warning-text">
-              View-only role. Control buttons are disabled.
-            </p>
-          )}
-
-          <button
-            className="emergency-btn"
-            disabled={!isOperator}
-            onClick={emergencyStop}
-          >
-            EMERGENCY STOP
-          </button>
-
-          <div className="control-row">
-            <span>Pump</span>
-            <button
-              disabled={!isOperator || status !== "ONLINE"}
-              onClick={togglePump}
-            >
-              {pumpOn ? "Turn Pump Off" : "Turn Pump On"}
-            </button>
-          </div>
-
-          <div className="control-row">
-            <span>LED Light Rods</span>
-            <button
-              disabled={!isOperator || status !== "ONLINE"}
-              onClick={toggleLight}
-            >
-              {lightOn ? "Turn Lights Off" : "Turn Lights On"}
-            </button>
-          </div>
-
-          <div className="state-box">
-            <p>Pump State: {pumpOn ? "ON" : "OFF"}</p>
-            <p>Light State: {lightOn ? "ON" : "OFF"}</p>
-          </div>
-        </section>
-
-        {isOperator && (
-          <section className="card">
-            <h2>Activity Log</h2>
-
-            <div className="log-container">
-              {logs.length === 0 ? (
-                <p>No events recorded.</p>
-              ) : (
-                logs.map((log) => (
-                  <div key={log.id} className="log-entry">
-                    <span>{log.timestamp}</span>
-                    <p>{log.message}</p>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        )}
-      </main>
-        {notificationOpen && isOperator && (
-        <aside className="notification-sidebar">
-          <div className="notification-header">
-            <h2>Notifications</h2>
-
-            <button
-              onClick={() => setNotificationOpen(false)}
-            >
-              ×
-            </button>
-          </div>
-
-          {unreadMessages.length === 0 ? (
-            <p>No unread messages</p>
-          ) : (
-            unreadMessages.map((msg) => (
-              <div
-                key={msg.id}
-                className="notification-item"
-              >
-                <strong>{msg.sender}</strong>
-
-                <p>
-                  Client: {msg.systemId}
-                </p>
-
-                <p>{msg.text}</p>
-
-                <span>{msg.timestamp}</span>
-              </div>
-            ))
-          )}
-        </aside>
-      )}
-      <ChatBox
-        systemId={selectedSystem.id}
-        currentUser={currentUser}
-        isOpen={chatOpen}
-        onClose={() => setChatOpen(false)}
-        onNewUnread={setUnreadMessages}
-      />
-    </div>
+    <Dashboard
+      selectedSystem={selectedSystem}
+      currentUser={currentUser}
+      role={role}
+      isOperator={isOperator}
+      status={status}
+      latency={latency}
+      sensorData={sensorData}
+      weather={weather}
+      pumpOn={pumpOn}
+      lightOn={lightOn}
+      logs={logs}
+      systemErrors={systemErrors}
+      chatOpen={chatOpen}
+      unreadCount={getCurrentSiteUnreadMessages().length}
+      getWeatherImpact={getWeatherImpact}
+      onBackToFleet={() => {
+        setSelectedSystem(null);
+        setWeather(null);
+        setChatOpen(false);
+        setNotificationOpen(false);
+      }}
+      onOpenChat={() => setChatOpen(true)}
+      onCloseChat={() => setChatOpen(false)}
+      onDownloadReport={downloadReport}
+      onLogout={logout}
+      onTogglePump={togglePump}
+      onToggleLight={toggleLight}
+      onEmergencyStop={emergencyStop}
+    />
   );
 }

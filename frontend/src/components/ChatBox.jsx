@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./ChatBox.css";
 
-function ChatBox({ systemId, currentUser, isOpen, onClose, onNewUnread }) {
+function ChatBox({ systemId, currentUser, isOpen, onClose }) {
   const storageKey = `chat-${systemId}`;
   const messagesEndRef = useRef(null);
 
@@ -13,15 +13,32 @@ function ChatBox({ systemId, currentUser, isOpen, onClose, onNewUnread }) {
     const parsed = saved ? JSON.parse(saved) : [];
 
     setMessages(parsed);
+  }
 
-    const unreadClientMessages = parsed.filter(
-      (msg) =>
-        currentUser.role === "operator" &&
-        msg.role === "viewer" &&
-        !msg.readByOperator
-    );
+  function markCurrentChatAsRead() {
+    const saved = localStorage.getItem(storageKey);
+    const parsed = saved ? JSON.parse(saved) : [];
 
-    onNewUnread(unreadClientMessages);
+    const updated = parsed.map((msg) => {
+      if (currentUser.role === "operator" && msg.role === "viewer") {
+        return {
+          ...msg,
+          readByOperator: true,
+        };
+      }
+
+      if (currentUser.role === "viewer" && msg.role === "operator") {
+        return {
+          ...msg,
+          readByViewer: true,
+        };
+      }
+
+      return msg;
+    });
+
+    localStorage.setItem(storageKey, JSON.stringify(updated));
+    setMessages(updated);
   }
 
   useEffect(() => {
@@ -32,25 +49,19 @@ function ChatBox({ systemId, currentUser, isOpen, onClose, onNewUnread }) {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [storageKey, currentUser.role]);
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (isOpen) {
+      markCurrentChatAsRead();
+    }
+  }, [isOpen, storageKey, currentUser.role]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
     });
   }, [messages, isOpen]);
-
-  useEffect(() => {
-    if (isOpen && currentUser.role === "operator") {
-      const updated = messages.map((msg) =>
-        msg.role === "viewer" ? { ...msg, readByOperator: true } : msg
-      );
-
-      localStorage.setItem(storageKey, JSON.stringify(updated));
-      setMessages(updated);
-      onNewUnread([]);
-    }
-  }, [isOpen]);
 
   function sendMessage(e) {
     e.preventDefault();
@@ -64,13 +75,15 @@ function ChatBox({ systemId, currentUser, isOpen, onClose, onNewUnread }) {
       role: currentUser.role,
       text: text.trim(),
       timestamp: new Date().toLocaleTimeString(),
+
       readByOperator: currentUser.role === "operator",
+      readByViewer: currentUser.role === "viewer",
     };
 
     const updatedMessages = [...messages, newMessage];
 
-    setMessages(updatedMessages);
     localStorage.setItem(storageKey, JSON.stringify(updatedMessages));
+    setMessages(updatedMessages);
     setText("");
   }
 

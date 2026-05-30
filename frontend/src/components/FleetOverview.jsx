@@ -3,6 +3,7 @@ import "./FleetOverview.css";
 import { useState } from "react";
 import SiteMap from "./SiteMap";
 
+
 function getFleetAverages(systems) {
   const count = systems.length;
 
@@ -32,6 +33,8 @@ function getFleetAverages(systems) {
     latency: total.latency / count,
   };
 }
+
+
 
 function getAlerts(system, averages) {
   const alerts = [];
@@ -98,7 +101,7 @@ function FleetOverview({
   const averages = getFleetAverages(systemsData);
   const [searchTerm, setSearchTerm] = useState("");
 
-  const sortedSystems = systemsData
+const sortedSystems = systemsData
   .map((system) => {
     const alerts = getAlerts(system, averages);
     const severity = getSeverity(alerts);
@@ -120,63 +123,83 @@ function FleetOverview({
     );
   })
   .sort((a, b) => a.healthScore - b.healthScore);
+
+const healthy = sortedSystems.filter(
+  (s) => s.severity === "healthy"
+).length;
+
+const warning = sortedSystems.filter(
+  (s) => s.severity === "warning"
+).length;
+
+const critical = sortedSystems.filter(
+  (s) => s.severity === "critical"
+).length;
   return (
     <div className="fleet-page">
       <header className="fleet-header fleet-header-row">
   <div>
     <h1>Fleet Overview</h1>
-        <p>Operator view: monitor all deployed photobioreactors</p>
-      </div>
+    <p>Operator view: monitor all deployed photobioreactors</p>
+  </div>
 
-      <div className="notification-wrapper">
-  <button
-    className="notification-btn"
-    onClick={onOpenNotifications}
-  >
-    🔔
+  <div className="fleet-header-actions">
+    <div className="notification-wrapper">
+      <button
+        className="notification-btn"
+        type="button"
+        onClick={onOpenNotifications}
+      >
+        🔔
 
-    {unreadMessages.length > 0 && (
-      <span className="notification-badge">
-        {unreadMessages.length}
-      </span>
-    )}
-  </button>
+        {unreadMessages.length > 0 && (
+          <span className="notification-badge">
+            {unreadMessages.length}
+          </span>
+        )}
+      </button>
 
-  {notificationOpen && (
-    <aside className="notification-dropdown">
-      <div className="notification-header">
-        <h2>Notifications</h2>
+      {notificationOpen && (
+        <aside className="notification-dropdown">
+          <div className="notification-header">
+            <h2>Notifications</h2>
 
-        <button type="button" onClick={onCloseNotifications}>
-          ×
-        </button>
-      </div>
-
-      {unreadMessages.length === 0 ? (
-        <p className="empty-notification">No unread messages</p>
-      ) : (
-        unreadMessages.map((msg) => (
-          <div key={msg.id} className="notification-item">
-            <strong>New message from {msg.sender}</strong>
-            <p>Client: {msg.systemId}</p>
-            <p>{msg.text}</p>
-            <span>{msg.timestamp}</span>
+            <button type="button" onClick={onCloseNotifications}>
+              ×
+            </button>
           </div>
-        ))
+
+          {unreadMessages.length === 0 ? (
+            <p className="empty-notification">No unread messages</p>
+          ) : (
+            unreadMessages.map((msg) => (
+              <div key={msg.id} className="notification-item">
+                <strong>New message from {msg.sender}</strong>
+                <p>Client: {msg.systemId}</p>
+                <p>{msg.text}</p>
+                <span>{msg.timestamp}</span>
+              </div>
+            ))
+          )}
+        </aside>
       )}
-    </aside>
-  )}
+    </div>
 
-        <button
-          className="logout-btn"
-          onClick={onLogout}
-        >
-          Logout
-        </button>
-
-</div>
-
-    </header>
+    <button
+      className="logout-btn"
+      type="button"
+      onClick={onLogout}
+    >
+      Logout
+    </button>
+  </div>
+</header>
+    <section className="fleet-stats">
+      <div>Healthy: {healthy}</div>
+      <div>Warning: {warning}</div>
+      <div>Critical: {critical}</div>
+      <div>Total: {sortedSystems.length}</div>
+    </section>
       <div className="search-section">
         <input
           type="text"
