@@ -1,9 +1,8 @@
-# ALBON PBR Remote Monitoring and Control MVP
+# Photobioreactor Remote Monitoring and Control Dashboard
 
-This project is a proof-of-concept remote monitoring and control system for ALBON’s solar-powered photobioreactor prototype.
+A full-stack environmental monitoring MVP for a simulated photobioreactor system. The project demonstrates live sensor telemetry, backend validation, WebSocket updates, role-based access, actuator controls, emergency stop logic, logs, metrics, and CSV report export.
 
-It includes a FastAPI backend, React frontend, and Python simulator client. The system can run locally on a developer laptop without physical PLC hardware.
-
+The system includes a Python simulator, FastAPI backend, and React frontend dashboard. It is designed as a local proof-of-concept for remote monitoring and safe control of bioreactor equipment.
 ---
 
 ## Features
