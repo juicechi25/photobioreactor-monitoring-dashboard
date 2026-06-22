@@ -24,7 +24,7 @@ function Login({ onLogin }) {
   return (
     <div className="login-container">
       <form className="login-card" onSubmit={handleSubmit}>
-        <h1>ALBON PBR Login</h1>
+        <h1>PBR Login</h1>
 
         <p className="subtitle">Remote Monitoring & Control System</p>
 
